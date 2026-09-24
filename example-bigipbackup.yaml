@@ -1,0 +1,12 @@
+# Where UCS files are stored: <backup_dir>/<device-short-hostname>/<host>_<YYYYMMDD-HHMM>.ucs
+backup_dir: .
+retention_weeks: 8
+log_file: bigipbackup.log
+# true, false, or a path to a CA bundle that signs the BIG-IP mgmt certs
+verify_tls: true
+# "tmos" works for local and system-configured remote auth (TACACS/RADIUS/LDAP)
+login_provider: tmos
+# Management addresses/hostnames (optionally host:port). Include BOTH members of each HA pair.
+devices:
+  - bigip01a.example.org
+  - bigip01b.example.org
