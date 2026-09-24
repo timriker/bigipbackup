@@ -1,5 +1,5 @@
-# Where UCS files are stored: <backup_dir>/<device-short-hostname>/<host>_<YYYYMMDD-HHMM>.ucs
-backup_dir: .
+# Where UCS files are stored: <backup_dir>/<device-short-hostname>/<device-short-hostname>_<YYYYMMDD-HHMM>.ucs
+backup_dir: backups
 retention_weeks: 8
 log_file: bigipbackup.log
 # true, false, or a path to a CA bundle that signs the BIG-IP mgmt certs

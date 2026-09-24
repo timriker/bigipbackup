@@ -1,4 +1,8 @@
 __pycache__/
 bigipbackup.env
 bigipbackup.yaml
-bigipbackup.log
+bigipbackup.log*
+backups/
+# UCS archives are unencrypted and contain private keys
+*.ucs
+*.ucs.part

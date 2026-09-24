@@ -6,8 +6,8 @@ using iControl REST. Meant to run weekly from cron.
 ## Setup
     pip install -r requirements.txt
     cp example-bigipbackup.env bigipbackup.env && chmod 600 bigipbackup.env
-    vi bigipbackup.yaml    # fill in creds
-    cp example-bigipbackup.yaml bigipbackup.yaml && chmod 600 bigipbackup.yaml
+    vi bigipbackup.env     # fill in creds
+    cp example-bigipbackup.yaml bigipbackup.yaml
     vi bigipbackup.yaml    # fill in devices
 
 The account needs the **Administrator** role on each device (required for `save sys ucs`).
