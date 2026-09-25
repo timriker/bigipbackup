@@ -1,4 +1,6 @@
-# Where UCS files are stored: <backup_dir>/<device-short-hostname>/<device-short-hostname>_<YYYYMMDD-HHMM>.ucs
+# Where UCS files are stored: <backup_dir>/<name>/<name>_<YYYYMMDD-HHMM>.ucs
+# <name> is the device's short name from the list below when all devices share one
+# domain, else the full name as listed (e.g. lb1.example.com and lb1.example.net).
 backup_dir: backups
 # Delete local UCS files older than this many days (by file mtime)
 retention_days: 56

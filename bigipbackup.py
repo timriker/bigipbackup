@@ -106,8 +106,13 @@ class BigIP:
         kwargs.setdefault("timeout", HTTP_TIMEOUT)
         resp = self.session.request(method, self._url(path), **kwargs)
         if not resp.ok:
+            # iControl errors are JSON; only "message" is useful.
+            try:
+                detail = resp.json()["message"]
+            except (ValueError, KeyError, TypeError):
+                detail = resp.text[:500]
             raise BackupError(
-                f"{method} {path} -> HTTP {resp.status_code}: {resp.text[:500]}",
+                f"{method} {path} -> HTTP {resp.status_code}: {detail}",
                 status=resp.status_code,
             )
         return resp
@@ -145,16 +150,19 @@ class BigIP:
         return self._request("GET", "/mgmt/tm/sys/global-settings").json()["hostname"]
 
     def list_ucs(self):
-        return self._request("GET", "/mgmt/tm/sys/ucs").json().get("items", [])
+        """{filename: size in bytes or None} for UCS files on the device."""
+        files = {}
+        for item in self._request("GET", "/mgmt/tm/sys/ucs").json().get("items", []):
+            # Items carry no "name"; the path is in apiRawValues.filename.
+            raw = item.get("apiRawValues", {})
+            name = os.path.basename(raw.get("filename", item.get("name", "")))
+            m = re.match(r"\s*(\d+)", raw.get("file_size", ""))
+            files[name] = int(m.group(1)) if m else None
+        return files
 
     def ucs_size(self, name):
         """Size in bytes as reported by the device, or None if not found."""
-        for item in self.list_ucs():
-            raw = item.get("apiRawValues", {})
-            if os.path.basename(raw.get("filename", item.get("name", ""))) == name:
-                m = re.match(r"\s*(\d+)", raw.get("file_size", ""))
-                return int(m.group(1)) if m else None
-        return None
+        return self.list_ucs().get(name)
 
     def save_ucs(self, name):
         resp = self._request(
@@ -202,7 +210,7 @@ class BigIP:
             if state == "FAILED":
                 # The task reports no reason; the cause is only in the device logs.
                 raise BackupError(
-                    f"UCS save task {task_id} FAILED (see /var/log/ltm and "
+                    f"UCS save task {task_id} did not complete (see /var/log/ltm and "
                     f"/var/log/restjavad.0.log on the device)"
                 )
         raise BackupError(f"UCS save task {task_id} timed out after {TASK_TIMEOUT}s")
@@ -263,7 +271,10 @@ class BigIP:
 
 
 def backup_device(host, cfg, username, password, dry_run=False, name=None):
+    """name (see device_names) labels log lines and is the local folder and UCS
+    file prefix."""
     name = name or host
+    backup_name = name.replace(":", "_")  # host:port or IPv6
     backup_root = Path(cfg["backup_dir"])
     dev = BigIP(
         host,
@@ -276,18 +287,18 @@ def backup_device(host, cfg, username, password, dry_run=False, name=None):
     _device.host = name
     try:
         dev.login()
-        short = dev.hostname().split(".")[0]
         if dry_run:
-            names = [i.get("name") for i in dev.list_ucs()]
-            log.info("%s (%s): login OK; UCS on device: %s", name, short, names)
+            names = sorted(dev.list_ucs())
+            log.info("%s: hostname %s; UCS: %s",
+                     name, dev.hostname(), names)
             return
 
-        ucs = f"{short}_{datetime.now():%Y%m%d-%H%M}.ucs"
-        dest_dir = backup_root / short
+        ucs = f"{backup_name}_{datetime.now():%Y%m%d-%H%M}.ucs"
+        dest_dir = backup_root / backup_name
         dest_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(dest_dir, 0o700)
 
-        log.info("%s: creating %s", name, ucs)
+        log.info("%s: creating UCS", name)
         created = False
         try:
             dev.save_ucs(ucs)
@@ -312,9 +323,11 @@ def backup_device(host, cfg, username, password, dry_run=False, name=None):
         _device.host = None
 
 
-def log_names(hosts):
-    """Map each host to the name used in logs: the short name when every host
-    is a DNS name in the same domain and short names are unique, else as given."""
+def device_names(hosts):
+    """Map each host to the name used in logs and for its backup folder: the
+    short name when every host is a DNS name in the same domain and short names
+    are unique, else as given. Based on the config, not the device's own
+    hostname, so two devices never share a folder."""
     parts = {}
     for h in hosts:
         name, _, port = h.rpartition(":") if h.count(":") == 1 else (h, "", "")
@@ -337,8 +350,11 @@ def prune(dest_dir, retention_days):
         if p.stat().st_mtime < cutoff:
             log.info("pruning %s", p)
             p.unlink()
+    # Leftovers from interrupted runs; skip any still being written.
+    stale = time.time() - 3600
     for p in dest_dir.glob("*.ucs.part"):
-        p.unlink()
+        if p.stat().st_mtime < stale:
+            p.unlink()
 
 
 def find_file(name, dirs):
@@ -423,8 +439,8 @@ def main():
     if cfg.get("verify_tls", True) is False:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    devices = cfg.get("devices") or []
-    names = log_names(devices)
+    devices = list(dict.fromkeys(cfg.get("devices") or []))  # drop duplicates
+    names = device_names(devices)
     if args.device:
         if args.device not in devices:
             log.error("%s not in config", args.device)
