@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly UCS backup of BIG-IP devices via iControl REST.
+"""UCS backup of BIG-IP devices via iControl REST.
 
 For each device in the config file (up to `max_threads` devices at once):
   1. Authenticate and obtain an X-F5-Auth-Token
@@ -283,13 +283,13 @@ def backup_device(host, cfg, username, password, dry_run=False):
                     "%s: could not delete %s from device: %s", host, name, e
                 )
 
-        prune(dest_dir, cfg.get("retention_weeks", 8))
+        prune(dest_dir, cfg.get("retention_days", 56))
     finally:
         dev.logout()
 
 
-def prune(dest_dir, retention_weeks):
-    cutoff = time.time() - timedelta(weeks=retention_weeks).total_seconds()
+def prune(dest_dir, retention_days):
+    cutoff = time.time() - timedelta(days=retention_days).total_seconds()
     for p in dest_dir.glob("*.ucs"):
         if p.stat().st_mtime < cutoff:
             log.info("pruning %s", p)

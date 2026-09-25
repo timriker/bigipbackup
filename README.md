@@ -1,7 +1,8 @@
 # BIG-IP UCS backup
 
 Creates, downloads, and removes a UCS archive on each BIG-IP listed in `bigipbackup.yaml`
-using iControl REST. Meant to run weekly from cron.
+using iControl REST. Meant to run from cron (daily, weekly, ...); local copies older than
+`retention_days` are pruned.
 
 Devices are backed up concurrently, up to `max_threads` at a time (set in
 `bigipbackup.yaml`, default 4). `-j N` overrides it; `-j 1` runs them one after another.
