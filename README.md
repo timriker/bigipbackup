@@ -3,6 +3,9 @@
 Creates, downloads, and removes a UCS archive on each BIG-IP listed in `bigipbackup.yaml`
 using iControl REST. Meant to run weekly from cron.
 
+Devices are backed up concurrently, up to `max_threads` at a time (set in
+`bigipbackup.yaml`, default 4). `-j N` overrides it; `-j 1` runs them one after another.
+
 ## Setup
     pip install -r requirements.txt
     cp example-bigipbackup.env bigipbackup.env && chmod 600 bigipbackup.env

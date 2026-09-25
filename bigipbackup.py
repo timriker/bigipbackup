@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Weekly UCS backup of BIG-IP devices via iControl REST.
 
-For each device in the config file:
+For each device in the config file (up to `max_threads` devices at once):
   1. Authenticate and obtain an X-F5-Auth-Token
   2. Create a UCS archive using the async task endpoint
   3. Download it in chunks via the file-transfer endpoint
@@ -28,6 +28,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -43,6 +44,7 @@ TASK_POLL_INTERVAL = 10  # seconds
 TASK_TIMEOUT = 1800  # seconds
 TASK_MAX_POLL_ERRORS = 6  # consecutive failed polls before giving up
 HTTP_TIMEOUT = 60  # seconds per request
+DEFAULT_MAX_THREADS = 4  # devices backed up concurrently
 
 DEFAULT_CONFIG = "bigipbackup.yaml"
 DEFAULT_ENV = "bigipbackup.env"
@@ -334,6 +336,11 @@ def main():
     )
     ap.add_argument("--device", help="back up only this device from the config")
     ap.add_argument("--dry-run", action="store_true", help="login and list UCS only")
+    ap.add_argument(
+        "-j", "--jobs", type=int,
+        help=f"devices to back up at once (default: config 'max_threads', "
+        f"else {DEFAULT_MAX_THREADS})",
+    )
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -367,13 +374,19 @@ def main():
             return 2
         devices = [args.device]
 
-    failed = []
-    for host in devices:
+    def run(host):
         try:
             backup_device(host, cfg, username, password, dry_run=args.dry_run)
+            return True
         except Exception as e:
             log.error("%s: FAILED: %s", host, e)
-            failed.append(host)
+            return False
+
+    jobs = args.jobs or cfg.get("max_threads", DEFAULT_MAX_THREADS)
+    jobs = max(1, min(jobs, len(devices) or 1))
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        results = list(pool.map(run, devices))
+    failed = [h for h, ok in zip(devices, results) if not ok]
 
     ok = len(devices) - len(failed)
     log.info("summary: %d/%d succeeded%s", ok, len(devices),

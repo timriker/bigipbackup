@@ -6,6 +6,8 @@ log_file: bigipbackup.log
 verify_tls: true
 # "tmos" works for local and system-configured remote auth (TACACS/RADIUS/LDAP)
 login_provider: tmos
+# How many devices to back up at the same time (-j/--jobs overrides)
+max_threads: 4
 # Management addresses/hostnames (optionally host:port). Include BOTH members of each HA pair.
 devices:
   - bigip01a.example.org
