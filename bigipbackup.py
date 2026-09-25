@@ -191,6 +191,7 @@ class BigIP:
         path = f"/mgmt/shared/file-transfer/ucs-downloads/{name}"
         tmp = dest.with_name(dest.name + ".part")
         start, total = 0, None
+        relogged = False
 
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "wb") as f:
@@ -198,14 +199,26 @@ class BigIP:
                 end = start + CHUNK_SIZE - 1
                 if total is not None:
                     end = min(end, total - 1)
-                resp = self._request(
-                    "GET",
-                    path,
-                    headers={
-                        "Content-Range": f"{start}-{end}/{total or 0}",
-                        "Content-Type": "application/octet-stream",
-                    },
-                )
+                try:
+                    resp = self._request(
+                        "GET",
+                        path,
+                        headers={
+                            "Content-Range": f"{start}-{end}/{total or 0}",
+                            "Content-Type": "application/octet-stream",
+                        },
+                    )
+                except BackupError as e:
+                    # Token expired or was dropped mid-download: log in again
+                    # and retry this chunk. A 401 right after re-login is fatal.
+                    if e.status != 401 or relogged:
+                        raise
+                    log.warning("%s: token lost during download, logging in "
+                                "again (at byte %d)", self.host, start)
+                    self.login()
+                    relogged = True
+                    continue
+                relogged = False
                 crange = resp.headers.get("Content-Range")
                 m = re.match(r"(\d+)-(\d+)/(\d+)", crange or "")
                 if not m:
