@@ -6,3 +6,5 @@ backups/
 # UCS archives are unencrypted and contain private keys
 *.ucs
 *.ucs.part
+*.swp
+*.log
