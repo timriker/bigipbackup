@@ -41,6 +41,7 @@ CHUNK_SIZE = 1024 * 1024  # 1 MiB; file-transfer endpoint limit
 TOKEN_TIMEOUT = 3600  # seconds
 TASK_POLL_INTERVAL = 10  # seconds
 TASK_TIMEOUT = 1800  # seconds
+TASK_MAX_POLL_ERRORS = 6  # consecutive failed polls before giving up
 HTTP_TIMEOUT = 60  # seconds per request
 
 DEFAULT_CONFIG = "bigipbackup.yaml"
@@ -51,7 +52,9 @@ log = logging.getLogger("bigipbackup")
 
 
 class BackupError(Exception):
-    pass
+    def __init__(self, msg, status=None):
+        super().__init__(msg)
+        self.status = status
 
 
 class BigIP:
@@ -82,7 +85,8 @@ class BigIP:
         resp = self.session.request(method, self._url(path), **kwargs)
         if not resp.ok:
             raise BackupError(
-                f"{method} {path} -> HTTP {resp.status_code}: {resp.text[:500]}"
+                f"{method} {path} -> HTTP {resp.status_code}: {resp.text[:500]}",
+                status=resp.status_code,
             )
         return resp
 
@@ -139,13 +143,37 @@ class BigIP:
         self._request("PUT", task_path, json={"_taskState": "VALIDATING"})
 
         deadline = time.monotonic() + TASK_TIMEOUT
+        errors = 0
+        relogged = False
         while time.monotonic() < deadline:
             time.sleep(TASK_POLL_INTERVAL)
             try:
                 state = self._request("GET", task_path).json().get("_taskState")
             except (requests.RequestException, BackupError) as e:
+                errors += 1
+                if errors >= TASK_MAX_POLL_ERRORS:
+                    raise BackupError(
+                        f"UCS save task {task_id}: giving up after {errors} "
+                        f"consecutive poll errors; last: {e}"
+                    ) from e
+                if getattr(e, "status", None) == 401:
+                    # restjavad can restart during a UCS save, dropping all
+                    # tokens. Log in again once; a second 401 is fatal.
+                    if relogged:
+                        raise BackupError(
+                            f"UCS save task {task_id}: still unauthorized "
+                            f"after re-login: {e}"
+                        ) from e
+                    log.warning("%s: token lost, logging in again", self.host)
+                    relogged = True
+                    try:
+                        self.login()
+                    except (requests.RequestException, BackupError) as le:
+                        log.warning("%s: re-login failed: %s", self.host, le)
+                    continue
                 log.warning("%s: task poll error (will retry): %s", self.host, e)
                 continue
+            errors = 0
             log.debug("%s: UCS task %s state %s", self.host, task_id, state)
             if state == "COMPLETED":
                 return
