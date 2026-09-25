@@ -22,11 +22,13 @@ SPDX-License-Identifier: MIT
 """
 
 import argparse
+import ipaddress
 import logging
 import logging.handlers
 import os
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -52,6 +54,22 @@ SEARCH_DIRS = [Path.cwd(), Path(__file__).resolve().parent, Path("/etc/bigipback
 
 log = logging.getLogger("bigipbackup")
 
+# Device being backed up by the current thread, so library log lines (e.g.
+# urllib3 "Retrying ...") can be tagged with it like our own messages are.
+_device = threading.local()
+_base_record_factory = logging.getLogRecordFactory()
+
+
+def _record_factory(*args, **kwargs):
+    record = _base_record_factory(*args, **kwargs)
+    host = getattr(_device, "host", None)
+    if host and record.name != log.name and isinstance(record.msg, str):
+        record.msg = f"{host}: {record.msg}"
+    return record
+
+
+logging.setLogRecordFactory(_record_factory)
+
 
 class BackupError(Exception):
     def __init__(self, msg, status=None):
@@ -60,8 +78,10 @@ class BackupError(Exception):
 
 
 class BigIP:
-    def __init__(self, host, username, password, login_provider="tmos", verify=True):
+    def __init__(self, host, username, password, login_provider="tmos", verify=True,
+                 name=None):
         self.host = host
+        self.name = name or host  # used in log messages
         self.base = f"https://{host}"
         self.username = username
         self.password = password
@@ -117,7 +137,7 @@ class BigIP:
         try:
             self._request("DELETE", f"/mgmt/shared/authz/tokens/{self.token}")
         except Exception as e:  # best effort
-            log.debug("%s: token delete failed: %s", self.host, e)
+            log.debug("%s: token delete failed: %s", self.name, e)
         self.token = None
         self.session.headers.pop("X-F5-Auth-Token", None)
 
@@ -166,17 +186,17 @@ class BigIP:
                             f"UCS save task {task_id}: still unauthorized "
                             f"after re-login: {e}"
                         ) from e
-                    log.warning("%s: token lost, logging in again", self.host)
+                    log.warning("%s: token lost, logging in again", self.name)
                     relogged = True
                     try:
                         self.login()
                     except (requests.RequestException, BackupError) as le:
-                        log.warning("%s: re-login failed: %s", self.host, le)
+                        log.warning("%s: re-login failed: %s", self.name, le)
                     continue
-                log.warning("%s: task poll error (will retry): %s", self.host, e)
+                log.warning("%s: task poll error (will retry): %s", self.name, e)
                 continue
             errors = 0
-            log.debug("%s: UCS task %s state %s", self.host, task_id, state)
+            log.debug("%s: UCS task %s state %s", self.name, task_id, state)
             if state == "COMPLETED":
                 return
             if state == "FAILED":
@@ -214,7 +234,7 @@ class BigIP:
                     if e.status != 401 or relogged:
                         raise
                     log.warning("%s: token lost during download, logging in "
-                                "again (at byte %d)", self.host, start)
+                                "again (at byte %d)", self.name, start)
                     self.login()
                     relogged = True
                     continue
@@ -242,7 +262,8 @@ class BigIP:
         self._request("DELETE", f"/mgmt/tm/sys/ucs/{name}")
 
 
-def backup_device(host, cfg, username, password, dry_run=False):
+def backup_device(host, cfg, username, password, dry_run=False, name=None):
+    name = name or host
     backup_root = Path(cfg["backup_dir"])
     dev = BigIP(
         host,
@@ -250,42 +271,64 @@ def backup_device(host, cfg, username, password, dry_run=False):
         password,
         login_provider=cfg.get("login_provider", "tmos"),
         verify=cfg.get("verify_tls", True),
+        name=name,
     )
+    _device.host = name
     try:
         dev.login()
         short = dev.hostname().split(".")[0]
         if dry_run:
             names = [i.get("name") for i in dev.list_ucs()]
-            log.info("%s (%s): login OK; UCS on device: %s", host, short, names)
+            log.info("%s (%s): login OK; UCS on device: %s", name, short, names)
             return
 
-        name = f"{short}_{datetime.now():%Y%m%d-%H%M}.ucs"
+        ucs = f"{short}_{datetime.now():%Y%m%d-%H%M}.ucs"
         dest_dir = backup_root / short
         dest_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(dest_dir, 0o700)
 
-        log.info("%s: creating %s", host, name)
+        log.info("%s: creating %s", name, ucs)
         created = False
         try:
-            dev.save_ucs(name)
+            dev.save_ucs(ucs)
             created = True
-            reported = dev.ucs_size(name)
-            size = dev.download_ucs(name, dest_dir / name)
+            reported = dev.ucs_size(ucs)
+            size = dev.download_ucs(ucs, dest_dir / ucs)
             if reported is not None and reported != size:
                 raise BackupError(f"device reports {reported} bytes, got {size}")
-            log.info("%s: saved %s (%d bytes)", host, dest_dir / name, size)
+            log.info("%s: saved %s (%d bytes)", name, dest_dir / ucs, size)
         finally:
             # A failed task may still have left a file behind; try to remove it.
             try:
-                dev.delete_ucs(name)
+                dev.delete_ucs(ucs)
             except Exception as e:
                 (log.warning if created else log.debug)(
-                    "%s: could not delete %s from device: %s", host, name, e
+                    "%s: could not delete %s from device: %s", name, ucs, e
                 )
 
         prune(dest_dir, cfg.get("retention_days", 56))
     finally:
         dev.logout()
+        _device.host = None
+
+
+def log_names(hosts):
+    """Map each host to the name used in logs: the short name when every host
+    is a DNS name in the same domain and short names are unique, else as given."""
+    parts = {}
+    for h in hosts:
+        name, _, port = h.rpartition(":") if h.count(":") == 1 else (h, "", "")
+        short, _, domain = name.partition(".")
+        try:
+            ipaddress.ip_address(name)
+            return {h: h for h in hosts}
+        except ValueError:
+            pass
+        parts[h] = (short + (f":{port}" if port else ""), domain)
+    shorts = [s for s, _ in parts.values()]
+    if len({d for _, d in parts.values()}) == 1 and len(set(shorts)) == len(shorts):
+        return {h: s for h, (s, _) in parts.items()}
+    return {h: h for h in hosts}
 
 
 def prune(dest_dir, retention_days):
@@ -381,6 +424,7 @@ def main():
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     devices = cfg.get("devices") or []
+    names = log_names(devices)
     if args.device:
         if args.device not in devices:
             log.error("%s not in config", args.device)
@@ -389,17 +433,18 @@ def main():
 
     def run(host):
         try:
-            backup_device(host, cfg, username, password, dry_run=args.dry_run)
+            backup_device(host, cfg, username, password, dry_run=args.dry_run,
+                          name=names[host])
             return True
         except Exception as e:
-            log.error("%s: FAILED: %s", host, e)
+            log.error("%s: FAILED: %s", names[host], e)
             return False
 
     jobs = args.jobs or cfg.get("max_threads", DEFAULT_MAX_THREADS)
     jobs = max(1, min(jobs, len(devices) or 1))
     with ThreadPoolExecutor(max_workers=jobs) as pool:
         results = list(pool.map(run, devices))
-    failed = [h for h, ok in zip(devices, results) if not ok]
+    failed = [names[h] for h, ok in zip(devices, results) if not ok]
 
     ok = len(devices) - len(failed)
     log.info("summary: %d/%d succeeded%s", ok, len(devices),
